@@ -37,7 +37,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-storage-azcopy/v10/common"
 	"github.com/Azure/azure-storage-azcopy/v10/ste"
-	"github.com/minio/minio-go/pkg/s3utils"
 )
 
 var once sync.Once
@@ -270,20 +269,17 @@ func checkAuthSafeForTarget(ct common.CredentialType, resource, extraSuffixesAAD
 			return fmt.Errorf("S3 access key authentication to %s is not enabled in AzCopy", resourceType.String())
 		}
 
-		// just check with minio. No need to have our own list of S3 domains, since minio effectively
-		// has that list already, we can't talk to anything outside that list because minio won't let us,
-		// and the parsing of s3 URL is non-trivial.  E.g. can't just look for the ending since
-		// something like https://someApi.execute-api.someRegion.amazonaws.com is AWS but is a customer-
-		// written code, not S3.
+		// Accept S3-compatible endpoints (AWS and non-AWS). NewS3URLParts will parse
+		// both AWS S3 endpoints and common S3-compatible endpoints (MinIO, custom FQDNs, IP:port, etc.).
 		ok := false
 		host := "<unparsable url>"
 		u, err := url.Parse(resource)
 		if err == nil {
 			host = u.Host
-			parts, err := common.NewS3URLParts(*u) // strip any leading bucket name from URL, to get an endpoint we can pass to s3utils
+			_, err := common.NewS3URLParts(*u) // strip any leading bucket name from URL
 			if err == nil {
-				u, err := url.Parse("https://" + parts.Endpoint)
-				ok = err == nil && s3utils.IsAmazonEndpoint(*u)
+				// NewS3URLParts succeeded -> accept as S3 endpoint (AWS or S3-compatible)
+				ok = true
 			}
 		}
 
