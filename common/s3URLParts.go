@@ -115,9 +115,39 @@ func findS3URLMatches(host string) (matches []string, isS3Host bool) {
 	hostNoPort := stripPort(host)
 	matchSlices := s3HostRegex.FindStringSubmatch(hostNoPort) // If match the first element would be entire host, and then follows the sub match strings.
 	if matchSlices == nil || !strings.Contains(hostNoPort, s3EssentialHostPart) {
+		// Check if this might be a custom S3-compatible endpoint (non-AWS)
+		// For custom endpoints, we still need some basic validation
+		// Accept any host that looks like it could be an S3 endpoint
+		if isCustomS3Endpoint(hostNoPort) {
+			// Return a basic match pattern for custom endpoints
+			return []string{hostNoPort, "", "", ""}, true
+		}
 		return nil, false
 	}
 	return matchSlices, true
+}
+
+// isCustomS3Endpoint checks if a host could be a custom S3-compatible endpoint
+func isCustomS3Endpoint(host string) bool {
+	// Basic validation for custom S3 endpoints:
+	// - Must not be empty
+	// - Must be an IP address OR contain indicators that it's likely an S3 service
+	if host == "" {
+		return false
+	}
+
+	// Allow IP addresses (IPv4)
+	if ipv4Regex.MatchString(host) {
+		return true
+	}
+
+	// For hostnames, be more selective - only accept if they have S3-related indicators
+	if strings.Contains(host, ".") {
+		// Use the same logic as isLikelyS3Endpoint to determine if this could be S3
+		return isLikelyS3Endpoint(host)
+	}
+
+	return false
 }
 
 // IsS3URL verifies if a given URL points to S3 URL supported by AzCopy-v10
@@ -165,13 +195,115 @@ func IsS3URL(u url.URL) bool {
 	if strings.Contains(hostNoPort, ".") {
 		// Reject known non-S3 domains
 		if strings.Contains(hostNoPort, ".blob.core.windows.net") ||
-		   strings.Contains(hostNoPort, ".file.core.windows.net") ||
-		   strings.Contains(hostNoPort, ".dfs.core.windows.net") {
+			strings.Contains(hostNoPort, ".file.core.windows.net") ||
+			strings.Contains(hostNoPort, ".dfs.core.windows.net") ||
+			strings.Contains(hostNoPort, "amazonawstypo.com") { // Reject obvious typos in AWS domain
 			return false
 		}
-		
+
 		labels := strings.Split(hostNoPort, ".")
 		if isBucketLabel(labels[0]) {
+			// Only accept virtual-host style if it looks like a legitimate S3 endpoint
+			// Either AWS domain, or custom endpoint with common S3 service indicators
+			if isLikelyS3Endpoint(hostNoPort) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// isLikelyS3Endpoint checks if a hostname is likely to be an S3-compatible endpoint
+func isLikelyS3Endpoint(host string) bool {
+	// AWS domains are always valid (but not typos)
+	if strings.Contains(host, "amazonaws.com") {
+		return true
+	}
+
+	// Reject obvious typos in AWS domain
+	if strings.Contains(host, "amazonawstypo") {
+		return false
+	}
+
+	hostLower := strings.ToLower(host)
+
+	// Explicitly reject known non-S3 domains even if they contain S3-like patterns
+	if strings.Contains(hostLower, ".blob.core.windows.net") ||
+		strings.Contains(hostLower, ".file.core.windows.net") ||
+		strings.Contains(hostLower, ".dfs.core.windows.net") ||
+		strings.Contains(hostLower, ".storage.googleapis.com") ||
+		strings.Contains(hostLower, ".storage.cloud.google.com") {
+		return false
+	}
+
+	// Common S3-compatible service indicators, but be careful about false positives
+	s3Indicators := []string{
+		"minio", "object", "oss", "obs", "cos", "ecs", "ceph", "swift",
+	}
+
+	for _, indicator := range s3Indicators {
+		if strings.Contains(hostLower, indicator) {
+			return true
+		}
+	}
+
+	// Be more specific about "s3" - should be at word boundaries
+	// Only accept s3- prefix if it's not clearly a non-S3 domain
+	if strings.Contains(hostLower, "s3.") || strings.Contains(hostLower, ".s3") ||
+		strings.Contains(hostLower, "-s3") || hostLower == "s3" {
+		return true
+	}
+
+	// For s3- prefix, be more careful - only accept if it looks like AWS or custom S3
+	if strings.HasPrefix(hostLower, "s3-") {
+		// Accept if it's AWS-related or doesn't contain known non-S3 patterns
+		if strings.Contains(hostLower, "amazonaws") ||
+			(!strings.Contains(hostLower, ".windows.net") &&
+				!strings.Contains(hostLower, ".googleapis.com") &&
+				!strings.Contains(hostLower, ".google.com")) {
+			return true
+		}
+	}
+
+	// Storage-related indicators, but be careful about Azure Blob Storage
+	storageIndicators := []string{
+		"object-storage", "object.storage", "oss", "obs",
+	}
+
+	for _, indicator := range storageIndicators {
+		if strings.Contains(hostLower, indicator) {
+			return true
+		}
+	}
+
+	// More generic storage terms, but exclude Azure domains
+	if !strings.Contains(hostLower, "blob.core.windows.net") &&
+		!strings.Contains(hostLower, "file.core.windows.net") &&
+		!strings.Contains(hostLower, "dfs.core.windows.net") {
+		genericStorageIndicators := []string{
+			"storage", "bucket",
+		}
+		for _, indicator := range genericStorageIndicators {
+			if strings.Contains(hostLower, indicator) {
+				return true
+			}
+		}
+	}
+
+	// Check for common cloud provider domains that might host S3-compatible services
+	cloudProviders := []string{
+		"cloudapp.azure.com",     // Azure VMs
+		"compute.amazonaws.com",  // EC2 instances
+		"cloud.google.com",       // GCP
+		"aliyuncs.com",           // Alibaba Cloud
+		"tencentcloudapi.com",    // Tencent Cloud
+		"scalewayclients.com",    // Scaleway
+		"digitaloceanspaces.com", // DigitalOcean Spaces
+	}
+
+	for _, provider := range cloudProviders {
+		if strings.Contains(hostLower, provider) {
 			return true
 		}
 	}

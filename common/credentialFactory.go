@@ -21,11 +21,15 @@
 package common
 
 import (
-	gcpUtils "cloud.google.com/go/storage"
 	"context"
+	"crypto/tls"
 	"fmt"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+	"net/http"
+	"strings"
 	"sync"
+
+	gcpUtils "cloud.google.com/go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 
 	"github.com/minio/minio-go"
 	"github.com/minio/minio-go/pkg/credentials"
@@ -83,16 +87,52 @@ func CreateS3Credential(ctx context.Context, credInfo CredentialInfo, options Cr
 // S3 credential related factory methods
 // ==============================================================================================
 func CreateS3Client(ctx context.Context, credInfo CredentialInfo, option CredentialOpOptions, logger ILogger) (*minio.Client, error) {
+	// Determine if we should use secure connection based on the original URL scheme
+	useSSL := true
+	if credInfo.S3CredentialInfo.Scheme != "" {
+		useSSL = strings.ToLower(credInfo.S3CredentialInfo.Scheme) == "https"
+	} else {
+		// When scheme is missing, try to infer from endpoint
+		// For custom endpoints (non-AWS), default to HTTP unless explicitly HTTPS
+		endpoint := strings.ToLower(credInfo.S3CredentialInfo.Endpoint)
+		if !strings.Contains(endpoint, "amazonaws.com") && !strings.Contains(endpoint, "aws.") {
+			// For custom S3-compatible endpoints, default to HTTP
+			useSSL = false
+		}
+	}
+
 	if credInfo.CredentialType == ECredentialType.S3PublicBucket() {
 		cred := credentials.NewStatic("", "", "", credentials.SignatureAnonymous)
-		return minio.NewWithOptions(credInfo.S3CredentialInfo.Endpoint, &minio.Options{Creds: cred, Secure: true, Region: credInfo.S3CredentialInfo.Region})
+		return minio.NewWithOptions(credInfo.S3CredentialInfo.Endpoint, &minio.Options{Creds: cred, Secure: useSSL, Region: credInfo.S3CredentialInfo.Region})
 	}
 	// Support access key
 	credential, err := CreateS3Credential(ctx, credInfo, option)
 	if err != nil {
 		return nil, err
 	}
-	s3Client, err := minio.NewWithCredentials(credInfo.S3CredentialInfo.Endpoint, credential, true, credInfo.S3CredentialInfo.Region)
+	// For HTTP endpoints, provide a default region if none specified to avoid bucket location queries
+	region := credInfo.S3CredentialInfo.Region
+	if !useSSL && region == "" {
+		region = "us-east-1" // Default region to avoid location queries
+	}
+
+	s3Client, err := minio.NewWithCredentials(credInfo.S3CredentialInfo.Endpoint, credential, useSSL, region)
+
+	// WORKAROUND: For HTTP endpoints, force all requests to use HTTP (including bucket location queries)
+	if !useSSL {
+		transport := &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: false},
+		}
+
+		// Create a custom HTTP client that forces HTTP scheme
+		httpClient := &http.Client{
+			Transport: &httpSchemeForcer{
+				Transport: transport,
+				ForceHTTP: true,
+			},
+		}
+		s3Client.SetCustomTransport(httpClient.Transport)
+	}
 
 	if logger != nil {
 		s3Client.TraceOn(NewS3HTTPTraceLogger(logger, LogDebug))
@@ -209,4 +249,22 @@ func GetCpkScopeInfo(cpkScopeInfo string) *blob.CPKScopeInfo {
 			EncryptionScope: &cpkScopeInfo,
 		}
 	}
+}
+
+// httpSchemeForcer is a custom transport that forces HTTP scheme for all requests
+type httpSchemeForcer struct {
+	Transport http.RoundTripper
+	ForceHTTP bool
+}
+
+func (h *httpSchemeForcer) RoundTrip(req *http.Request) (*http.Response, error) {
+	if h.ForceHTTP && req.URL.Scheme == "https" {
+		// Clone the request to avoid modifying the original
+		newReq := req.Clone(req.Context())
+		newURL := *req.URL
+		newURL.Scheme = "http"
+		newReq.URL = &newURL
+		req = newReq
+	}
+	return h.Transport.RoundTrip(req)
 }

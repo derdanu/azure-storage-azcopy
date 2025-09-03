@@ -213,6 +213,7 @@ func newS3Traverser(rawURL *url.URL, ctx context.Context, opts InitResourceTrave
 		S3CredentialInfo: common.S3CredentialInfo{
 			Endpoint: t.s3URLParts.Endpoint,
 			Region:   t.s3URLParts.Region,
+			Scheme:   t.s3URLParts.Scheme,
 		},
 	}, common.CredentialOpOptions{
 		LogError: glcm.Error,

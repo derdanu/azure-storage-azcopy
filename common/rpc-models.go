@@ -169,6 +169,7 @@ type GCPCredentialInfo struct {
 type S3CredentialInfo struct {
 	Endpoint string
 	Region   string
+	Scheme   string // URL scheme (http/https) to determine SSL usage
 }
 
 type CopyJobPartOrderErrorType string
